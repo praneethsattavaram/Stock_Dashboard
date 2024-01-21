@@ -37,15 +37,26 @@ def load_watchlist():
         )
     ''')
 
-    # Commit the table creation and fetch watchlist data
+    # Commit the table creation and fetch watchlist data with current market price
     conn.commit()
-    watchlist_data = cursor.execute('SELECT * FROM watchlist').fetchall()
+    watchlist_data = cursor.execute('SELECT id, ticker FROM watchlist').fetchall()
+
+    # Add current market price to watchlist data
+    watchlist_with_price = []
+    for row in watchlist_data:
+        ticker = row[1]
+        try:
+            data = yf.download(ticker, period='1d')
+            current_price = data['Close'].iloc[-1]
+            watchlist_with_price.append((row[0], f"{ticker} (${current_price:.2f})", ticker))
+        except Exception as e:
+            st.error(f"Error fetching current price for {ticker}: {e}")
+
     conn.close()
 
-    return watchlist_data
+    return watchlist_with_price
 
 # Your Streamlit app continues from here...
-
 
 # Load Streamlit app
 st.title('Stock Dashboard')
@@ -125,11 +136,20 @@ with tech_indicator:
 
 watchlist = st.sidebar.text_area('Watchlist (comma-separated)', 'AAPL,GOOGL,MSFT')
 
-#Watchlist functionality
-if st.sidebar.button('Add to Watchlist'):
-    tickers = [ticker.strip() for ticker in watchlist.split(',')]
-    for ticker in tickers:
-        add_to_watchlist(ticker)
+# Watchlist functionality
+watchlist_table = load_watchlist()
+
+# Display a dropdown to select a stock from the watchlist
+selected_stock = st.sidebar.selectbox('Select Stock from Watchlist', [row[1] for row in watchlist_table])
+
+# Button to trigger the action for the selected stock
+if st.sidebar.button('Show Charts and Details'):
+    try:
+        selected_data = yf.download(selected_stock, start=start_date, end=end_date)
+        st.header(f'Charts and Details for {selected_stock}')
+        # Add your chart and details display code here using selected_data
+    except Exception as e:
+        st.error(f"Error fetching data for {selected_stock}: {e}")
 
 # Display watchlist
 st.sidebar.subheader('Watchlist')
