@@ -76,30 +76,61 @@ create_watchlist_table()
 st.title('Stock Dashboard')
 
 # Sidebar for user input
-ticker = st.sidebar.text_input('Ticker', key='ticker_input')
+ticker_input = st.sidebar.text_input('Enter Ticker Symbol', key='ticker_input')
 start_date = st.sidebar.date_input('Start Date', key='start_date_input')
 end_date = st.sidebar.date_input('End Date', key='end_date_input')
 
 # Add stock to watchlist
 st.sidebar.subheader('Add to Watchlist')
 new_ticker = st.sidebar.text_input('Enter Ticker Symbol', key='new_ticker_input')
+watchlist_table = load_watchlist()
+existing_tickers = [row[0] for row in watchlist_table]
 if st.sidebar.button('Add', key='add_button'):
-    add_to_watchlist(new_ticker.upper())
+    if new_ticker.upper() in existing_tickers:
+        st.error(f'{new_ticker} is already in the watchlist!')
+    else:
+        add_to_watchlist(new_ticker.upper())
+    st.experimental_rerun()
 
 # Display watchlist
 st.sidebar.subheader('Watchlist')
 watchlist_table = load_watchlist()
 for row in watchlist_table:
-    col1, col2 = st.sidebar.columns([3, 1])
+    ticker = row[0]
+    data = yf.download(ticker, period='2d')
+    if len(data) > 1:
+        price_change = (data['Close'].iloc[-1] - data['Close'].iloc[-2]) / data['Close'].iloc[-2] * 100
+        price_change = f"{price_change:.2f}%"
+    else:
+        price_change = "N/A"
+    col1, col2, col3 = st.sidebar.columns([3, 2, 2])
     col1.write(row[1])
-    if col2.button('Delete', key=f'delete_{row[0]}'):
+    if col2.button('View', key=f'view_{row[0]}'):
+        ticker = row[0]
+        st.session_state.ticker = ticker  # Update session state
+    if col3.button('Delete', key=f'delete_{row[0]}'):
         remove_from_watchlist(row[0])
-        # Refresh the watchlist
-        watchlist_table = load_watchlist()
+        st.experimental_rerun()
 
 # Load data
+if 'ticker' in st.session_state:
+    ticker = st.session_state.ticker
+elif ticker_input:
+    if st.button('Apply'):
+        ticker = ticker_input
+        st.session_state.ticker = ticker  # Update session state
+        st.experimental_rerun()  # Rerun the app
+else:
+    st.error("Please select a ticker symbol or add one to your watchlist.")
+    st.stop()
+    
 data = yf.download(ticker, start=start_date, end=end_date)
 
+# Check if data is available
+if data.empty:
+    st.error(f"No data available for {ticker}.")
+    st.stop()
+    
 # Line Chart and Candle Chart
 line_chart, candle_chart = st.tabs(["Line Chart","Candle Chart"])
 with line_chart:
@@ -110,7 +141,7 @@ with candle_chart:
     st.header('Candle Chart')
     fig = go.Figure(data=[go.Candlestick(x=data.index, 
                                          open=data['Open'], 
-                                         high=data['High'], 
+                                         high=data['High'],
                                          low=data['Low'], 
                                          close=data['Close'])])
     st.plotly_chart(fig)
@@ -171,15 +202,11 @@ with tech_indicator:
     st.plotly_chart(figw_ind_new)
     st.write(indicator)
 
-# Watchlist functionality
-watchlist_table = load_watchlist()
-selected_stock = st.sidebar.selectbox('Select Stock from Watchlist', [row[1] for row in watchlist_table])
+def load_data(ticker):
+    # Code to load data
 
-# Button to trigger the action for the selected stock
-if st.sidebar.button('Show Charts and Details'):
-    try:
-        selected_data = yf.download(selected_stock.split(' ')[0], start=start_date, end=end_date)
-        st.header(f'Charts and Details for {selected_stock}')
-        # Add your chart and details display code here using selected_data
-    except Exception as e:
-        st.error(f"Error fetching data for {selected_stock}: {e}")
+    ticker_input = st.text_input('Enter Ticker Symbol')
+    if ticker_input:
+        ticker = ticker_input
+        st.session_state.ticker = ticker
+        load_data(ticker)
