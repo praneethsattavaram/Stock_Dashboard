@@ -1,5 +1,5 @@
 # Stock_Dashboard
-Stock Dashboard Using Streamlit in Python
+Stock Dashboard Using Streamlit in Pyhton
 
 README file for the provided code:
 
