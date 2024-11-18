@@ -15,13 +15,6 @@ def init_db():
     conn = sqlite3.connect('trading_app.db')
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS watchlist (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ticker TEXT UNIQUE,
-            added_date DATE DEFAULT CURRENT_DATE
-        )
-    ''')
-    cursor.execute('''
         CREATE TABLE IF NOT EXISTS portfolio (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker TEXT,
@@ -43,42 +36,165 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Initialize session state variables
 if 'page' not in st.session_state:
-    st.session_state.page = "Dashboard"  # Default page is Dashboard
+    st.session_state.page = "Dashboard"
 
 if 'current_balance' not in st.session_state:
-    st.session_state.current_balance = 100000  # Example initial balance
+    st.session_state.current_balance = 100000.0  # Example initial balance
 
-
-def get_stock_data(ticker):
-    data = yf.download(ticker, period='1d')
-    return data['Close'].iloc[-1]  # Get the latest closing price
-
-
-# Watchlist table functions
-def create_watchlist_table():
-    conn = sqlite3.connect('watchlist.db')
+# Utility function to reset database tables
+def reset_table(table_name):
+    conn = sqlite3.connect('trading_app.db')
     cursor = conn.cursor()
-    cursor.execute(''' 
-        CREATE TABLE IF NOT EXISTS watchlist 
-        ( 
-            id INTEGER PRIMARY KEY AUTOINCREMENT, 
-            ticker TEXT NOT NULL UNIQUE, 
-            added_date DATE DEFAULT CURRENT_DATE 
-        ) 
-    ''')
-    conn.commit()
+    try:
+        cursor.execute(f'DELETE FROM {table_name}')
+        conn.commit()
+        st.success(f"{table_name.capitalize()} reset successfully!")
+    except sqlite3.Error as e:
+        st.error(f"Database error: {e}")
+    finally:
+        conn.close()
+
+# Utility function to reset balance
+def reset_balance():
+    st.session_state.current_balance = 100000.0
+    st.success("Balance reset to $100,000!")
+    
+    
+# Utility function to get stock price
+def get_stock_price(ticker):
+    try:
+        data = yf.download(ticker, period='1d')
+        return data['Close'].iloc[-1]  # Get the latest closing price
+    except Exception:
+        return None
+
+# Buy stock and update portfolio
+def buy_stock(ticker, quantity):
+    current_price = get_stock_price(ticker)
+    if current_price is None:
+        st.error(f"Failed to fetch price for {ticker}.")
+        return
+
+    total_cost = current_price * quantity
+    if total_cost > st.session_state.current_balance:
+        st.error(f"Insufficient funds! You have ${st.session_state.current_balance:.2f} available.")
+        return
+
+    conn = sqlite3.connect('trading_app.db')
+    cursor = conn.cursor()
+    try:
+        cursor.execute('''
+            INSERT INTO portfolio (ticker, quantity, buy_price, buy_date)
+            VALUES (?, ?, ?, ?)
+        ''', (ticker, quantity, current_price, date.today()))
+        cursor.execute('''
+            INSERT INTO trade_history (ticker, quantity, trade_type, trade_price)
+            VALUES (?, ?, 'BUY', ?)
+        ''', (ticker, quantity, current_price))
+        conn.commit()
+
+        # Update balance
+        st.session_state.current_balance -= total_cost
+        st.success(f"Bought {quantity} shares of {ticker} at ${current_price:.2f} each.")
+    except sqlite3.Error as e:
+        st.error(f"Database error: {e}")
+    finally:
+        conn.close()
+
+# Sell stock and update portfolio
+def sell_stock(ticker, quantity):
+    current_price = get_stock_price(ticker)
+    if current_price is None:
+        st.error(f"Failed to fetch price for {ticker}.")
+        return
+
+    conn = sqlite3.connect('trading_app.db')
+    cursor = conn.cursor()
+    try:
+        cursor.execute('SELECT * FROM portfolio WHERE ticker = ?', (ticker,))
+        portfolio_data = cursor.fetchall()
+
+        total_shares_owned = sum(row[2] for row in portfolio_data)
+        if total_shares_owned < quantity:
+            st.error("You do not have enough shares to sell.")
+            return
+
+        shares_sold = 0
+        for row in portfolio_data:
+            remaining = quantity - shares_sold
+            if remaining == 0:
+                break
+
+            owned_shares = row[2]
+            if owned_shares <= remaining:
+                st.session_state.current_balance += owned_shares * current_price
+                cursor.execute('DELETE FROM portfolio WHERE id = ?', (row[0],))
+                shares_sold += owned_shares
+            else:
+                st.session_state.current_balance += remaining * current_price
+                cursor.execute('UPDATE portfolio SET quantity = quantity - ? WHERE id = ?', (remaining, row[0]))
+                shares_sold += remaining
+
+        cursor.execute('''
+            INSERT INTO trade_history (ticker, quantity, trade_type, trade_price)
+            VALUES (?, ?, 'SELL', ?)
+        ''', (ticker, quantity, current_price))
+        conn.commit()
+        st.success(f"Sold {quantity} shares of {ticker} at ${current_price:.2f} each.")
+    except sqlite3.Error as e:
+        st.error(f"Database error: {e}")
+    finally:
+        conn.close()
+
+# View portfolio
+def view_portfolio():
+    conn = sqlite3.connect('trading_app.db')
+    cursor = conn.cursor()
+    portfolio_data = cursor.execute('SELECT * FROM portfolio').fetchall()
     conn.close()
+
+    if not portfolio_data:
+        st.info("Your portfolio is empty.")
+        return
+
+    portfolio_df = pd.DataFrame(portfolio_data, columns=['ID', 'Ticker', 'Quantity', 'Buy Price', 'Buy Date'])
+    portfolio_df['Current Price'] = portfolio_df['Ticker'].apply(get_stock_price)
+    portfolio_df['Profit/Loss'] = (portfolio_df['Current Price'] - portfolio_df['Buy Price']) * portfolio_df['Quantity']
+
+    st.write(f"**Available Balance:** ${st.session_state.current_balance:.2f}")
+    st.write(portfolio_df[['Ticker', 'Quantity', 'Buy Price', 'Current Price', 'Profit/Loss']])
+
+    total_pl = portfolio_df['Profit/Loss'].sum()
+    st.write(f"**Total Portfolio P/L:** ${total_pl:.2f}")
+
+# View trade history
+def view_trade_history():
+    conn = sqlite3.connect('trading_app.db')
+    cursor = conn.cursor()
+    trade_history_data = cursor.execute('SELECT * FROM trade_history').fetchall()
+    conn.close()
+
+    if not trade_history_data:
+        st.info("No trade history available.")
+        return
+
+    trade_history_df = pd.DataFrame(trade_history_data, columns=['ID', 'Ticker', 'Quantity', 'Trade Type', 'Trade Price', 'Trade Date'])
+    st.write(trade_history_df[['Ticker', 'Quantity', 'Trade Type', 'Trade Price', 'Trade Date']])
 
 def add_to_watchlist(ticker):
     conn = sqlite3.connect('watchlist.db')
     cursor = conn.cursor()
     try:
         cursor.execute('INSERT INTO watchlist (ticker) VALUES (?)', (ticker,))
-        conn.commit()
-        st.success(f'Successfully added {ticker} to the watchlist!')
-    except sqlite3.IntegrityError:
-        st.error(f'{ticker} is already in the watchlist!')
+        if cursor.fetchone():
+            st.info(f'{ticker} is already in your watchlist!')
+        else:
+            # Insert the ticker if it doesn't exist
+            cursor.execute('INSERT INTO watchlist (ticker) VALUES (?)', (ticker,))
+            conn.commit()
+            st.success(f'Successfully added {ticker} to the watchlist!')
     except sqlite3.Error as e:
         st.error(f'Error adding {ticker} to the watchlist: {e}')
     finally:
@@ -95,7 +211,7 @@ def remove_from_watchlist(ticker):
         st.error(f'Error removing {ticker} from the watchlist: {e}')
     finally:
         conn.close()
-
+        
 def load_watchlist():
     conn = sqlite3.connect('watchlist.db')
     cursor = conn.cursor()
@@ -111,187 +227,38 @@ def load_watchlist():
             st.error(f"Error fetching current price for {ticker}: {e}")
     conn.close()
     return watchlist_with_price
-
-# Function to add to portfolio
-def buy_stock(ticker, quantity, price):
-    global current_balance
-    buy_price = get_stock_data(ticker)  # Get the latest market price for the stock
-    total_cost = buy_price * quantity
-
-    if total_cost > current_balance:
-        st.error(f"Insufficient funds! You only have ${current_balance:.2f} available.")
-        return
-
-    conn = sqlite3.connect('trading_app.db')
-    cursor = conn.cursor()
-    try:
-        cursor.execute('''
-            INSERT INTO portfolio (ticker, quantity, buy_price, buy_date) 
-            VALUES (?, ?, ?, ?)
-        ''', (ticker, quantity, price, date.today()))
-        cursor.execute('''
-            INSERT INTO trade_history (ticker, quantity, trade_type, trade_price)
-            VALUES (?, ?, 'BUY', ?)
-        ''', (ticker, quantity, price))
-        conn.commit()
-
-        # Update balance
-        current_balance -= total_cost
-        st.success(f'Bought {quantity} shares of {ticker} at ${price:.2f} per share. Remaining balance: ${current_balance:.2f}')
-    except sqlite3.Error as e:
-        st.error(f"Error: {e}")
-    finally:
-        conn.close()
-
-# Function to sell from portfolio
-def sell_stock(ticker, quantity):
-    # Fetch current market price (latest close price)
-    sell_price = get_stock_data(ticker)
-    
-    conn = sqlite3.connect('trading_app.db')
-    cursor = conn.cursor()
-
-    # Check if the user has enough shares to sell
-    cursor.execute('SELECT * FROM portfolio WHERE Ticker = ? ORDER BY Buy_Date ASC', (ticker,))
-    portfolio_data = cursor.fetchall()
-
-    total_shares_owned = sum([row[2] for row in portfolio_data])
-
-    if total_shares_owned < quantity:
-        st.error("You do not have enough shares to sell.")
-        conn.close()
-        return False
-    else:
-        # Perform the sell
-        shares_sold = 0
-        for row in portfolio_data:
-            if shares_sold < quantity:
-                remaining_shares = quantity - shares_sold
-                owned_shares = row[2]
-                if owned_shares <= remaining_shares:
-                    # Update the balance and portfolio
-                    st.session_state.current_balance += sell_price * owned_shares
-                    shares_sold += owned_shares
-                    cursor.execute('DELETE FROM portfolio WHERE ID = ?', (row[0],))
-                else:
-                    # Partial sell
-                    st.session_state.current_balance += sell_price * remaining_shares
-                    cursor.execute('UPDATE portfolio SET Quantity = Quantity - ? WHERE ID = ?', 
-                                   (remaining_shares, row[0]))
-                    shares_sold += remaining_shares
-
-        conn.commit()
-        conn.close()
-        st.success(f"Successfully sold {quantity} shares of {ticker} at ${sell_price:.2f} each.")
-        return True
-
-
-# Function to view portfolio
-def view_portfolio():
-    current_balance = st.session_state.current_balance
-      # Reference the global balance
-    conn = sqlite3.connect('trading_app.db')
-    cursor = conn.cursor()
-    
-    # Fetch portfolio data
-    portfolio_data = cursor.execute('SELECT * FROM portfolio').fetchall()
-    conn.close()
-
-    # Calculate the total invested amount
-    total_invested = 0
-    for row in portfolio_data:
-        quantity = row[2]
-        buy_price = row[3]
-        total_invested += quantity * buy_price
-
-    # Display the available balance and invested amount
-    st.write(f"**Available Balance:** ${current_balance:.2f}")
-    st.write(f"**Total Invested Amount:** ${total_invested:.2f}")
-
-    # If portfolio is not empty, display the portfolio details
-    if portfolio_data:
-        portfolio_df = pd.DataFrame(portfolio_data, columns=['ID', 'Ticker', 'Quantity', 'Buy Price', 'Buy Date'])
-        portfolio_df['Current Price'] = portfolio_df['Ticker'].apply(lambda x: yf.download(x, period='1d')['Close'].iloc[-1])
-        portfolio_df['Profit/Loss'] = (portfolio_df['Current Price'] - portfolio_df['Buy Price']) * portfolio_df['Quantity']
-        
-        # Display the portfolio with profit/loss
-        st.write(portfolio_df[['Ticker', 'Quantity', 'Buy Price', 'Current Price', 'Profit/Loss']])
-        
-        # Calculate and display the total P/L
-        total_pl = portfolio_df['Profit/Loss'].sum()
-        st.write(f"**Total Portfolio P/L:** ${total_pl:.2f}")
-    else:
-        st.info('No stocks in portfolio.')
-
-
-
-# Function to view trade history
-def view_trade_history():
-    conn = sqlite3.connect('trading_app.db')
-    cursor = conn.cursor()
-    trade_history_data = cursor.execute('SELECT * FROM trade_history').fetchall()
-    conn.close()
-
-    if trade_history_data:
-        trade_history_df = pd.DataFrame(trade_history_data, columns=['ID', 'Ticker', 'Quantity', 'Trade Type', 'Trade Price', 'Trade Date'])
-        st.write(trade_history_df[['Ticker', 'Quantity', 'Trade Type', 'Trade Price', 'Trade Date']])
-    else:
-        st.info('No trade history available.')
-
 # Initialize database
 init_db()
-create_watchlist_table()
 
-# Create horizontal navigation bar (navbar)
-col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
-
+# Navigation
+col1, col2, col3, col4 = st.columns(4)
 with col1:
     if st.button("Dashboard"):
         st.session_state.page = "Dashboard"
-
 with col2:
     if st.button("Portfolio"):
         st.session_state.page = "Portfolio"
-
 with col3:
     if st.button("Trade History"):
         st.session_state.page = "Trade History"
-
 with col4:
     if st.button("Watchlist"):
         st.session_state.page = "Watchlist"
-
-# Display content based on the selected page
-if 'page' not in st.session_state:
-    st.session_state.page = "Dashboard"  # Default page is Dashboard
-
-# Main page layout with the Dashboard
+        
+        
+# Page content
 if st.session_state.page == "Dashboard":
-    st.title('Stock Dashboard')
-
-    # Ticker Input
-    ticker_input = st.sidebar.text_input('Enter Ticker Symbol')
+    st.title("Stock Dashboard")
+    ticker_input = st.sidebar.text_input("Enter Ticker Symbol")
     start_date = st.sidebar.date_input('Start Date', value=date(2020, 1, 1))
     end_date = st.sidebar.date_input('End Date', value=date.today())
-    
-    
-    # Buy and Sell options under sidebar
-    st.sidebar.subheader("Buy/Sell Stock")
-    
-    # Buy Stock Section
-    buy_qty = st.sidebar.number_input('Quantity to Buy', min_value=1, step=1)
-   
-    if st.sidebar.button('Buy Stock'):
-        buy_stock(ticker_input, buy_qty)
+    quantity = st.sidebar.number_input("Quantity", min_value=1, step=1)
 
-    # Sell Stock Section
-    sell_qty = st.sidebar.number_input('Quantity to Sell', min_value=1, step=1)
-   
+    if st.sidebar.button("Buy Stock"):
+        buy_stock(ticker_input, quantity)
 
-    if st.sidebar.button('Sell Stock'):
-        sell_stock(ticker_input, sell_qty)
-        
-        
+    if st.sidebar.button("Sell Stock"):
+        sell_stock(ticker_input, quantity)
     if ticker_input:
         # Fetch the stock data
         data = yf.download(ticker_input, start=start_date, end=end_date)
@@ -368,41 +335,65 @@ if st.session_state.page == "Dashboard":
             figw_ind_new = px.line(indicator)
             st.plotly_chart(figw_ind_new)
             st.write(indicator)
-            
+           
 
+
+  
 
 elif st.session_state.page == "Portfolio":
-    st.title('Portfolio')
+    st.title("Portfolio")
+    st.subheader(f"Available Balance: ${st.session_state.current_balance:.2f}")
     view_portfolio()
+    if st.button("Reset Portfolio"):
+        reset_table('portfolio')
+        reset_balance()
 
 elif st.session_state.page == "Trade History":
-    st.title('Trade History')
+    st.title("Trade History")
+    
     view_trade_history()
+    if st.button("Reset Trade History"):
+        reset_table('trade_history')
+
+
+
 
 elif st.session_state.page == "Watchlist":
     st.title("My Watchlist")
+    
+    # Load watchlist data
     watchlist_data = load_watchlist()
     
     if watchlist_data:
-        watchlist_df = pd.DataFrame(watchlist_data, columns=["Ticker", "Current Price"])
+        # Create a table-like display with headers
+        col1, col2, col3 = st.columns([2, 2, 1])
+        col1.subheader("Stock Name")
+        col2.subheader("Stock Price")
+        col3.subheader("Remove")
         
-        for index, row in watchlist_df.iterrows():
+        # Display each stock in the watchlist
+        for index, (ticker, price) in enumerate(watchlist_data):
             col1, col2, col3 = st.columns([2, 2, 1])
             with col1:
-                st.write(row['Ticker'])
+                st.write(ticker)
             with col2:
-                st.write(row['Current Price'])
+                st.write(price)
             with col3:
-                if st.button(f"Remove {row['Ticker']}", key=f"remove_{row['Ticker']}"):
-                    remove_from_watchlist(row['Ticker'])
-                    st.experimental_rerun()     
+                if st.button(f"Remove", key=f"remove_{ticker}"):
+                    remove_from_watchlist(ticker)
+                    st.experimental_rerun()
     else:
         st.info("Your watchlist is empty.")
     
+    # Input to add a ticker to the watchlist
     ticker_to_add = st.text_input("Add a Ticker to Watchlist")
     if st.button("Add to Watchlist"):
         if ticker_to_add:
             add_to_watchlist(ticker_to_add)
-            st.experimental_rerun()  
+            st.experimental_rerun()
         else:
             st.error("Please enter a ticker to add.")
+
+    
+    if st.button("Reset Watchlist"):
+        reset_table('watchlist')
